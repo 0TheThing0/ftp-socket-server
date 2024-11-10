@@ -9,7 +9,7 @@ FilesystemElement::FilesystemElement(
 	groupPermission(groupPermission), allPermission(allPermission) {}
 
 
-bool FilesystemElement::hasPermission(User* user, Permission perm) {
+bool FilesystemElement::hasPermission(User* user, Permission perm){
 	if (user->username == owner->username) {
 		return (userPermission & perm) != 0;
 	}

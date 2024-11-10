@@ -24,23 +24,9 @@ bool FtpServer::start() {
 		return 1;
 	}
 
-	struct addrinfo* result = NULL, * ptr = NULL, hints;
+	struct addrinfo* ptr = NULL;
 
-	ZeroMemory(&hints, sizeof(hints));
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_protocol = IPPROTO_TCP;
-	hints.ai_flags = AI_PASSIVE;
-
-	// Resolve the local address and port to be used by the server
-	iResult = getaddrinfo(NULL, "453", &hints, &result);
-	if (iResult != 0) {
-		printf("getaddrinfo failed: %d\n", iResult);
-		WSACleanup();
-		return 1;
-	}
-
-	SOCKET serverSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+	SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (serverSocket == INVALID_SOCKET) {
 		return false;
 	}

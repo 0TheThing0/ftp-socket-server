@@ -184,7 +184,7 @@ void ClientSession::handleCommandSocket() {
 			bool res = createPassiveSocket();
 
 			if (res) {
-		
+				this->transferType = TRANSFER_TYPE::PASSIVE;
 				SOCKADDR_IN addr;
 				int len = sizeof(addr);
 				getsockname(dataSocket, (struct sockaddr*)&addr, &len);
@@ -203,24 +203,72 @@ void ClientSession::handleCommandSocket() {
 				response = "425 Can't open data connection.\r\n";
 		}
 
+		//Enter a active mode to transfer data
+		else if (strncmp(buffer, "PORT", 4) == 0) {
+			std::string params = command.substr(5);
+			std::vector<int> parts;
+
+			std::stringstream ss(params);
+			std::string temp;
+			while (std::getline(ss, temp, ',')) {
+				parts.push_back(std::stoi(temp));
+			}
+			std::string ip = std::to_string(parts[0]) + "." + std::to_string(parts[1]) + "." +
+				std::to_string(parts[2]) + "." + std::to_string(parts[3]);
+
+			int port = parts[4] * 256 + parts[5];
+
+			struct sockaddr_in serverAddr;
+			memset(&serverAddr, 0, sizeof(serverAddr)); // Обнуление структуры
+			serverAddr.sin_family = AF_INET;
+			serverAddr.sin_port = htons(port);
+
+			inet_pton(AF_INET, ip.c_str(), &serverAddr.sin_addr);
+
+			this->userSocket = socket(AF_INET, SOCK_STREAM, 0);
+			if (connect(this->userSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+				response = "550 Socket creation error.\r\n";
+				closesocket(this->userSocket);
+				this->userSocket = INVALID_SOCKET;
+			}
+			else {
+				this->transferType = TRANSFER_TYPE::ACTIVE;
+				response = "200 PORT command successful.\r\n";
+			}
+		}
+
 		//List all elements in directory (WITHOUT path)
 		else if (strncmp(buffer, "LIST", 4) == 0) {
-			connectionThread.join();
+			if (this->transferType == TRANSFER_TYPE::DISABLED) {
+				response = "400 Specify transfer type first.\r\n";
+			}
+			else {
+				if (this->transferType == TRANSFER_TYPE::PASSIVE) {
+					connectionThread.join();
+				}
 
-			if (this->currentDirectory->hasPermission(this->user.get(), READ))
-			response = "150 Here comes the directory listing.\r\n";
-			send(this->commandSocket, response.c_str(), response.size(), 0);
-			sendDirectoryList();
-			response = "226 Directoty send OK.\r\n";
+				if (this->currentDirectory->hasPermission(this->user.get(), READ))
+					response = "150 Here comes the directory listing.\r\n";
+				send(this->commandSocket, response.c_str(), response.size(), 0);
+				sendDirectoryList();
+				response = "226 Directoty send OK.\r\n";
+			}
 		}
 
 		//List all elements names in directory
 		else if (strncmp(buffer, "NLST", 4) == 0) {
-			connectionThread.join();
-			response = "150 Here comes the directory listing.\r\n";
-			send(this->commandSocket, response.c_str(), response.size(), 0);
-			sendDirectoryNameList();
-			response = "226 Directoty send OK.\r\n";
+			if (this->transferType == TRANSFER_TYPE::DISABLED) {
+				response = "400 Specify transfer type first.\r\n";
+			}
+			else {
+				if (this->transferType == TRANSFER_TYPE::PASSIVE) {
+					connectionThread.join();
+				}
+				response = "150 Here comes the directory listing.\r\n";
+				send(this->commandSocket, response.c_str(), response.size(), 0);
+				sendDirectoryNameList();
+				response = "226 Directoty send OK.\r\n";
+			}
 		}
 
 		//Send file to client
@@ -228,6 +276,8 @@ void ClientSession::handleCommandSocket() {
 			std::string filepath = command.substr(5);
 			filepath.erase(filepath.end() - 2, filepath.end());
 
+
+			//TODO:redo
 			char* context = NULL;
 
 			char* path = strtok_s(&filepath[0], "/", &context);
@@ -241,67 +291,91 @@ void ClientSession::handleCommandSocket() {
 				path = strtok_s(NULL, "/", &context);
 			}
 
-			connectionThread.join();
-			
-			std::shared_ptr<File> file = this->currentDirectory->getFile(filename);
-			if (file == NULL) {
-				response = "550 File not found.\r\n";
-			}
-			else if (!file->hasPermission(this->user.get(), READ)) {
-				response = "550 Permission denied\r\n";
-			}
+			if (this->transferType == TRANSFER_TYPE::DISABLED) {
+				response = "400 Specify transfer type first.\r\n";
+			} 
 			else {
-				response = "150 Opening connection for " + filename + ".\r\n";
-				send(this->commandSocket, response.c_str(), response.size(), 0);
-				if (this->transferType == NONE) {
-					response = "550 transfer type unspecified.\r\n";
+				if (this->transferType == TRANSFER_TYPE::PASSIVE) {
+					connectionThread.join();
+				}
+				std::shared_ptr<File> file = this->currentDirectory->getFile(filename);
+				if (file == NULL) {
+					response = "550 File not found.\r\n";
+				}
+				else if (!file->hasPermission(this->user.get(), READ)) {
+					response = "550 Permission denied\r\n";
 				}
 				else {
-					sendFileData(file->realPath);
-					response = "226 Transfer complete.\r\n";
+					response = "150 Opening connection for " + filename + ".\r\n";
+					send(this->commandSocket, response.c_str(), response.size(), 0);
+					if (this->transferType == NONE) {
+						response = "550 transfer type unspecified.\r\n";
+					}
+					else {
+						sendFileData(file->realPath);
+						response = "226 Transfer complete.\r\n";
+					}
 				}
 			}
-
 		}
 
 		//Load file to server
 		else if (strncmp(buffer, "STOR", 4) == 0) {
 			std::string filename = command.substr(5);
 			filename.erase(filename.end() - 2, filename.end());
-			connectionThread.join();
-			
-			std::shared_ptr<File> file = this->currentDirectory->getFile(filename);
 
-			//Check that file avaliable to change or create
-			if ((file==nullptr && this->currentDirectory->hasPermission(this->user.get(),WRITE))
-				|| (file != nullptr && file->hasPermission(this->user.get(), WRITE))) {
-				if (file == nullptr) {
-					const std::string uniqueName = File::generateUniqueFilename();
-
-					file = std::shared_ptr<File>(std::make_shared<File>(filename, this->server->filesStorage + uniqueName,
-						this->user.get(), this->user->defaultGroup, defaultUser, defaultGroup, defaultAll));
-					this->currentDirectory->addFile(file);
-				}
-				response = "150 Opening connection for receiving " + filename + ".\r\n";
-				send(this->commandSocket, response.c_str(), response.size(), 0);
-				getFileData(file->realPath);
-				response = "226 Transfer complete.\r\n";
+			if (this->transferType == TRANSFER_TYPE::DISABLED) {
+				response = "400 Specify transfer type first.\r\n";
 			}
 			else {
-				response = "550 Permission denied.\r\n";
+				if (this->transferType == TRANSFER_TYPE::PASSIVE) {
+					connectionThread.join();
+				}
+
+				std::shared_ptr<File> file = this->currentDirectory->getFile(filename);
+
+				//Check that file avaliable to change or create
+				if ((file == nullptr && this->currentDirectory->hasPermission(this->user.get(), WRITE))
+					|| (file != nullptr && file->hasPermission(this->user.get(), WRITE))) {
+					if (file == nullptr) {
+						const std::string uniqueName = File::generateUniqueFilename();
+
+						file = std::shared_ptr<File>(std::make_shared<File>(filename, this->server->filesStorage + uniqueName,
+							this->user.get(), this->user->defaultGroup, defaultUser, defaultGroup, defaultAll));
+						this->currentDirectory->addFile(file);
+					}
+					response = "150 Opening connection for receiving " + filename + ".\r\n";
+					send(this->commandSocket, response.c_str(), response.size(), 0);
+					getFileData(file->realPath);
+					response = "226 Transfer complete.\r\n";
+				}
+				else {
+					response = "550 Permission denied.\r\n";
+				}
 			}
 		}
 
 		//Store file with unique name
 		else if (strncmp(buffer, "STOU", 4) == 0) {
-			const std::string uniqueName = File::generateUniqueFilename();
-			std::shared_ptr<File> file(std::make_shared<File>(uniqueName, this->server->filesStorage + uniqueName,
-				this->user.get(), this->user->defaultGroup, defaultUser, defaultGroup, defaultAll));
+			
+			if (this->transferType == TRANSFER_TYPE::DISABLED) {
+				response = "400 Specify transfer type first.\r\n";
+			}
+			else {
+				if (this->transferType == TRANSFER_TYPE::PASSIVE) {
+					connectionThread.join();
+				}
+
+				const std::string uniqueName = File::generateUniqueFilename();
+				std::shared_ptr<File> file(std::make_shared<File>(uniqueName, this->server->filesStorage + uniqueName,
+					this->user.get(), this->user->defaultGroup, defaultUser, defaultGroup, defaultAll));
+
 				response = "150 Opening connection for unique file storage.\r\n";
 				send(this->commandSocket, response.c_str(), response.size(), 0);
 				getFileData(file->realPath);
 				response = "226 File stored as " + file->name + ".\r\n";
 				this->currentDirectory->addFile(file);
+			}
 		}
 
 		//Create directory
@@ -360,11 +434,11 @@ void ClientSession::handleCommandSocket() {
 			std::string type = command.substr(5);
 			type.erase(type.end() - 2, type.end());
 			if (type.compare("I") == 0) {
-				this->transferType = BINARY;
+				this->transferFormat = BINARY;
 				response = "200 Type set to " + type + ".\r\n";
 			}
 			else if (type.compare("A") == 0) {
-				this->transferType = ASCII;
+				this->transferFormat = ASCII;
 				response = "200 Type set to " + type + ".\r\n";
 			}
 			else
@@ -500,6 +574,7 @@ void ClientSession::sendDirectoryList() {
 	send(this->userSocket, res.c_str(), res.length(), 0);
 	closesocket(this->userSocket);
 	this->userSocket = INVALID_SOCKET;
+	this->transferType = TRANSFER_TYPE::DISABLED;
 }
 
 void ClientSession::sendDirectoryNameList() {
@@ -507,6 +582,7 @@ void ClientSession::sendDirectoryNameList() {
 	send(this->userSocket, res.c_str(), res.length(), 0);
 	closesocket(this->userSocket);
 	this->userSocket = INVALID_SOCKET;
+	this->transferType = TRANSFER_TYPE::DISABLED;
 }
 
 void ClientSession::sendFileData(std::string& filePath) {
@@ -537,6 +613,7 @@ void ClientSession::sendFileData(std::string& filePath) {
 
 	closesocket(this->userSocket);
 	this->userSocket = INVALID_SOCKET;
+	this->transferType = TRANSFER_TYPE::DISABLED;
 }
 
 void ClientSession::getFileData(std::string& downloadPath) {
@@ -561,4 +638,5 @@ void ClientSession::getFileData(std::string& downloadPath) {
 	outputFile.close();
 	closesocket(this->userSocket);
 	this->userSocket = INVALID_SOCKET;
+	this->transferType = TRANSFER_TYPE::DISABLED;
 }
